@@ -25,10 +25,10 @@ jobs:
           pip install pyinstaller
 
       - name: Build CLI
-        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name yourproject-cli
+        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name shitty-iso-dl-cli
 
       - name: Build GUI
-        run: pyinstaller --onefile src/shitty-iso-dl-gui.py --name yourproject-gui --noconsole
+        run: pyinstaller --onefile src/shitty-iso-dl-gui.py --name shitty-iso-dl-gui --noconsole
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -55,13 +55,13 @@ jobs:
           pip install pyinstaller
 
       - name: Build CLI binary
-        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name yourproject-cli
+        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name shitty-iso-dl-cli
 
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-cli-build
-          path: dist/yourproject-cli
+          path: dist/shitty-iso-dl-cli
 
 
   build-linux-gui-appimage:
@@ -91,7 +91,7 @@ jobs:
       - name: Build GUI with PyInstaller
         run: |
           pyinstaller --onedir src/shitty-iso-dl-gui.py \
-            --name yourproject-gui \
+            --name shitty-iso-dl-gui \
             --noconsole \
             --hidden-import tkinter \
             --collect-all tkinter
