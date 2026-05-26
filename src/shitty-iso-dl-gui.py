@@ -190,7 +190,7 @@ class DistrohopperApp(tk.Tk):
         main_frame = ttk.Frame(self, padding=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(main_frame, text="Distrohopper", style="Title.TLabel").pack(pady=(0, 20))
+        ttk.Label(main_frame, text="Shitty ISO Downloader", style="Title.TLabel").pack(pady=(0, 20))
 
         # Destination Directory
         dir_frame = ttk.Frame(main_frame)
