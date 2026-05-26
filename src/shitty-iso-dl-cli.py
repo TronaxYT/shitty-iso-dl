@@ -11,6 +11,39 @@ import urllib.error
 # Applies to both connect and per-read operations on the underlying socket.
 socket.setdefaulttimeout(60)
 
+# Filenames here come from either scraped HTML (regex-matched) or the GitHub
+# API (attacker-controllable). Even though current regexes are tight, we
+# defensively clamp filenames to a plausible-ISO-name shape and refuse anything
+# with path separators or query strings.
+_SAFE_FILENAME = re.compile(r'^[A-Za-z0-9._+-]+\.iso$')
+
+def safe_filename(url):
+    # Strip any query string, then take only the basename component. This
+    # neutralises both `../traversal.iso` and `evil.iso?download=x` shapes.
+    name = url.split('?', 1)[0].split('#', 1)[0].rsplit('/', 1)[-1]
+    if not _SAFE_FILENAME.match(name):
+        raise ValueError(f"refusing suspicious filename: {name!r}")
+    return name
+
+# A redirect handler that lets normal cross-host 3xx through (legitimate for
+# mirror systems and CDN handoffs) but refuses to downgrade HTTPS to HTTP.
+# Combined with the lack of integrity checking on bare downloads, an attacker
+# who controls any link in a redirect chain could otherwise silently substitute
+# an ISO over a plaintext channel.
+class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.full_url.startswith('https://') and newurl.startswith('http://'):
+            raise urllib.error.HTTPError(
+                req.full_url, code,
+                f"refusing HTTPS->HTTP downgrade to {newurl}",
+                headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+_opener = urllib.request.build_opener(_NoDowngradeRedirectHandler())
+_opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+urllib.request.install_opener(_opener)
+
 # ---------------------------------------------------------
 # set your download directory here, or leave blank 
 # to be prompted when the script runs
@@ -276,7 +309,7 @@ DISTROS = {
     },
     "TinyCore": {
         "type": "regex",
-        "base_url": "http://tinycorelinux.net/14.x/x86_64/release/",
+        "base_url": "https://tinycorelinux.net/14.x/x86_64/release/",
         "file_regex": r'href="(CorePure64-[0-9\.]+\.iso)"'
     },
     "GoboLinux": {
@@ -331,6 +364,63 @@ def get_html(url):
 def _natural_key(s):
     return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
 
+# ---------------------------------------------------------
+# Optional SHA256 verification.
+#
+# Caveat: the SHA file is usually hosted next to the ISO on the same mirror,
+# so this is NOT protection against a compromised mirror -- it only catches
+# transport corruption and the most casual tampering. Real protection needs
+# GPG-signed checksum files, which is per-distro work and not yet implemented.
+# ---------------------------------------------------------
+_SHA_CANDIDATES = ("SHA256SUMS", "sha256sums.txt", "sha256sum.txt", "SHA256")
+
+def _parse_sha256_for(text, iso_filename):
+    # Accept the two common layouts:
+    #   "<hash>  <filename>"   (coreutils sha256sum)
+    #   "SHA256 (<filename>) = <hash>"   (BSD style)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('SHA256') and '=' in line and iso_filename in line:
+            hexpart = line.split('=', 1)[1].strip().split()[0]
+            if re.fullmatch(r'[0-9a-fA-F]{64}', hexpart):
+                return hexpart.lower()
+        parts = line.split()
+        if len(parts) >= 2 and re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]):
+            # Filename may be prefixed with '*' (binary mode) or './'.
+            tail = parts[-1].lstrip('*').lstrip('./')
+            if tail == iso_filename:
+                return parts[0].lower()
+    return None
+
+def fetch_expected_sha256(iso_url, iso_filename):
+    base = iso_url.rsplit('/', 1)[0] + '/'
+    # Try a per-file sidecar first (e.g. foo.iso.sha256), then directory-wide files.
+    sidecars = (f"{iso_filename}.sha256", f"{iso_filename}.sha256sum")
+    for candidate in sidecars + _SHA_CANDIDATES:
+        try:
+            text = get_html(base + candidate)
+        except Exception:
+            continue
+        # Sidecar files often contain just the hash, possibly followed by the name.
+        if candidate in sidecars:
+            first = text.strip().split()
+            if first and re.fullmatch(r'[0-9a-fA-F]{64}', first[0]):
+                return first[0].lower()
+        got = _parse_sha256_for(text, iso_filename)
+        if got:
+            return got
+    return None
+
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
 def find_latest_via_regex(config):
     base_url = config['base_url']
     
@@ -376,14 +466,30 @@ def find_latest_github(repo):
         print(f"  [!] GitHub API error: {e}")
     return None
 
-def download_file(url, dest_folder):
-    file_name = url.split('/')[-1]
+def download_file(url, dest_folder, verify_sha256=False):
+    try:
+        file_name = safe_filename(url)
+    except ValueError as e:
+        print(f"  [!] {e}")
+        return False
     dest_path = os.path.join(dest_folder, file_name)
     tmp_path = dest_path + '.part'
 
     if os.path.exists(dest_path):
         print(f"  [*] {file_name} already exists. Skipping.")
         return True
+
+    expected_sha = None
+    if verify_sha256:
+        print(f"  [*] Looking up SHA256 for {file_name}...")
+        try:
+            expected_sha = fetch_expected_sha256(url, file_name)
+        except Exception as e:
+            print(f"  [!] Could not fetch SHA256 file: {e}")
+        if expected_sha is None:
+            print(f"  [!] No SHA256 found for {file_name}; refusing download (use without --verify to skip).")
+            return False
+        print(f"  [*] Expected SHA256: {expected_sha}")
 
     print(f"  [*] Downloading {file_name}...")
     try:
@@ -413,6 +519,15 @@ def download_file(url, dest_folder):
         if file_size > 0 and downloaded != file_size:
             raise IOError(f"size mismatch: got {downloaded} bytes, expected {file_size}")
 
+        # Verify checksum BEFORE the rename, so a mismatched file never lands
+        # under its final name where the next run would treat it as complete.
+        if expected_sha is not None:
+            print("\n  [*] Verifying SHA256...")
+            actual = sha256_file(tmp_path)
+            if actual.lower() != expected_sha.lower():
+                raise IOError(f"SHA256 mismatch: got {actual}, expected {expected_sha}")
+            print("  [+] SHA256 OK.")
+
         os.replace(tmp_path, dest_path)
         print("\n  [+] Download complete!")
         return True
@@ -431,7 +546,10 @@ def download_file(url, dest_folder):
 
 def main():
     print("=== Linux ISO Auto-Puller ===")
-    
+
+    # Support `--verify` as a non-interactive flag in addition to the prompt.
+    verify_sha256 = '--verify' in sys.argv[1:]
+
     # Get Destination
     dest_dir = DEFAULT_DIR
     if not dest_dir:
@@ -444,6 +562,10 @@ def main():
         except Exception as e:
             print(f"[!] Could not create directory: {e}")
             sys.exit(1)
+
+    if not verify_sha256:
+        ans = input("Verify SHA256 after download? (y/N): ").strip().lower()
+        verify_sha256 = ans in ('y', 'yes')
 
     # Show Menu
     distro_names = list(DISTROS.keys())
@@ -481,7 +603,7 @@ def main():
 
         if download_url:
             print(f"  [*] Found latest: {download_url}")
-            ok = download_file(download_url, dest_dir)
+            ok = download_file(download_url, dest_dir, verify_sha256=verify_sha256)
             if not ok:
                 failures.append((distro, "download failed"))
         else:
