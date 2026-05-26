@@ -1,3 +1,5 @@
+# CURRENTLY RESOLVING ACCOUNT ISSUE, RELEASES SHOULD BE UP BY TOMORROW
+
 # shitty-iso-dl
 
 Automatically resolves and downloads the latest ISO for any of the listed Linux distributions. No more need to visit every single website for your private ISO archive.
