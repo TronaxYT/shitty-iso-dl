@@ -1,10 +1,10 @@
-# CURRENTLY RESOLVING ACCOUNT ISSUE, RELEASES SHOULD BE UP BY TOMORROW
-
 # shitty-iso-dl
 
 Automatically resolves and downloads the latest ISO for any of the listed Linux distributions. No more need to visit every single website for your private ISO archive.
 
 Available as a CLI or a very primitive GUI.
+
+I will de-shittify this app little by little, I don't quite have the time right now though. For now, this is a proof of concept.
 
 ---
 
@@ -37,14 +37,14 @@ Grab the latest release for your platform from the [Releases](../../releases) pa
 
 ## Run from Source
 
-Requires Python 3.x. No third-party dependencies. (Thank you Tkinter my beloved)
+Requires Python 3.x. No third-party dependencies. (Thank you Tkinter my beloved <3)
 
 ```bash
 # CLI
-python src/cli.py
+python src/shitty-iso-dl-cli.py
 
 # GUI
-python src/gui.py
+python src/shitty-iso-dl-gui.py
 ```
 
 ---
