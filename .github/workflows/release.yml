@@ -1,0 +1,169 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"   # triggers on v1.0.0, v1.2.3, etc.
+
+jobs:
+
+  # ─── Windows: CLI + GUI as .exe ───────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build CLI
+        run: pyinstaller --onefile src/cli.py --name yourproject-cli
+
+      - name: Build GUI
+        run: pyinstaller --onefile src/gui.py --name yourproject-gui --noconsole
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-builds
+          path: dist/*
+
+
+  # ─── Linux: CLI as raw binary, GUI as AppImage ────────────────────────────
+  build-linux-cli:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build CLI binary
+        run: pyinstaller --onefile src/cli.py --name yourproject-cli
+
+      - name: Upload Linux CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-cli-build
+          path: dist/yourproject-cli
+
+
+  build-linux-gui-appimage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-dev \
+            libfuse2 fuse \
+            libglib2.0-0 libgl1 \
+            binutils
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build GUI with PyInstaller
+        run: |
+          pyinstaller --onedir src/gui.py \
+            --name yourproject-gui \
+            --noconsole \
+            --hidden-import tkinter \
+            --collect-all tkinter
+
+      - name: Download linuxdeploy + AppImage plugin
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage
+
+      - name: Prepare AppDir structure
+        run: |
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+          # Copy PyInstaller output into AppDir
+          cp -r dist/yourproject-gui/* AppDir/usr/bin/
+
+          # Minimal .desktop file (required by AppImage spec)
+          cat > AppDir/usr/share/applications/yourproject-gui.desktop << EOF
+          [Desktop Entry]
+          Name=YourProject GUI
+          Exec=yourproject-gui
+          Icon=yourproject-gui
+          Type=Application
+          Categories=Utility;
+          EOF
+
+          # Placeholder icon — replace with your own .png if you have one
+          convert -size 256x256 xc:#444444 \
+            AppDir/usr/share/icons/hicolor/256x256/apps/yourproject-gui.png 2>/dev/null || \
+          wget -q -O AppDir/usr/share/icons/hicolor/256x256/apps/yourproject-gui.png \
+            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy/master/resources/linuxdeploy.png
+
+      - name: Build AppImage
+        env:
+          ARCH: x86_64
+          OUTPUT: yourproject-gui.AppImage
+        run: |
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --plugin appimage \
+            --output appimage
+
+          # Rename to predictable filename
+          mv *.AppImage yourproject-gui.AppImage
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-gui-appimage
+          path: yourproject-gui.AppImage
+
+
+  # ─── Release: collect all artifacts and publish ───────────────────────────
+  release:
+    needs: [build-windows, build-linux-cli, build-linux-gui-appimage]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to create releases
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true   # auto-generates changelog from commits
