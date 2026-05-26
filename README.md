@@ -59,7 +59,10 @@ python src/shitty-iso-dl-gui.py
 
 ## To-Do
 
-**Implement Checksum-check (idk how to call it)** - For obvious security reasons
-**Better GUI** - Tkinter is functional per-se, but I wanna make this pretty
-**Implement torrent** - Implement "Download with torrent" option, I know many users prefer this
-**Add distros** - This one is self-explanatory
+**Implement Checksum-check (idk how to call it)** — For obvious security reasons.
+
+**Better GUI** — Tkinter is functional per-se, but I wanna make this pretty.
+
+**Implement torrent** — Implement "Download with torrent" option, I know many users prefer this.
+
+**Add distros** — This one is self-explanatory.
