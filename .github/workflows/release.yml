@@ -134,7 +134,6 @@ jobs:
         run: |
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
-            --plugin appimage \
             --output appimage
 
           # Rename to predictable filename
