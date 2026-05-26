@@ -324,6 +324,13 @@ def get_html(url):
     with urllib.request.urlopen(req, timeout=30) as response:
         return response.read().decode('utf-8')
 
+# Natural-key sort: splits a string into runs of digits and non-digits so
+# that numeric runs compare as integers. Without this, plain sorted() picks
+# '9' as "latest" over '10', breaking Mageia, Tails, Rocky, Devuan,
+# CentOS-Stream, and any future distro that crosses a digit-count boundary.
+def _natural_key(s):
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
+
 def find_latest_via_regex(config):
     base_url = config['base_url']
     
@@ -335,8 +342,7 @@ def find_latest_via_regex(config):
             return None
         # Extract string if regex returns tuples, sort to find highest version
         dirs = [d[0] if isinstance(d, tuple) else d for d in dirs]
-        # Natural sort assumption: Apache auto-index usually sorts version numbers sequentially
-        latest_dir = sorted(dirs)[-1] 
+        latest_dir = sorted(dirs, key=_natural_key)[-1]
         
         target_url = base_url + latest_dir + "/"
         if 'sub_path' in config:
@@ -351,7 +357,7 @@ def find_latest_via_regex(config):
         if not files:
             return None
         files = [f[0] if isinstance(f, tuple) else f for f in files]
-        latest_file = sorted(files)[-1]
+        latest_file = sorted(files, key=_natural_key)[-1]
         return target_url + latest_file
     except Exception as e:
         print(f"  [!] Error reading {target_url}: {e}")
