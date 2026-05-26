@@ -25,10 +25,10 @@ jobs:
           pip install pyinstaller
 
       - name: Build CLI
-        run: pyinstaller --onefile src/cli.py --name yourproject-cli
+        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name yourproject-cli
 
       - name: Build GUI
-        run: pyinstaller --onefile src/gui.py --name yourproject-gui --noconsole
+        run: pyinstaller --onefile src/shitty-iso-dl-gui.py --name yourproject-gui --noconsole
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -55,7 +55,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build CLI binary
-        run: pyinstaller --onefile src/cli.py --name yourproject-cli
+        run: pyinstaller --onefile src/shitty-iso-dl-cli.py --name yourproject-cli
 
       - name: Upload Linux CLI artifact
         uses: actions/upload-artifact@v4
@@ -90,7 +90,7 @@ jobs:
 
       - name: Build GUI with PyInstaller
         run: |
-          pyinstaller --onedir src/gui.py \
+          pyinstaller --onedir src/shitty-iso-dl-gui.py \
             --name yourproject-gui \
             --noconsole \
             --hidden-import tkinter \
@@ -109,28 +109,28 @@ jobs:
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
 
           # Copy PyInstaller output into AppDir
-          cp -r dist/yourproject-gui/* AppDir/usr/bin/
+          cp -r dist/shitty-iso-dl-gui/* AppDir/usr/bin/
 
           # Minimal .desktop file (required by AppImage spec)
-          cat > AppDir/usr/share/applications/yourproject-gui.desktop << EOF
+          cat > AppDir/usr/share/applications/shitty-iso-dl-gui.desktop << EOF
           [Desktop Entry]
-          Name=YourProject GUI
-          Exec=yourproject-gui
-          Icon=yourproject-gui
+          Name=Shitty ISO Downloader GUI
+          Exec=shitty-iso-dl-gui
+          Icon=shitty-iso-dl-gui
           Type=Application
           Categories=Utility;
           EOF
 
           # Placeholder icon — replace with your own .png if you have one
           convert -size 256x256 xc:#444444 \
-            AppDir/usr/share/icons/hicolor/256x256/apps/yourproject-gui.png 2>/dev/null || \
-          wget -q -O AppDir/usr/share/icons/hicolor/256x256/apps/yourproject-gui.png \
+            AppDir/usr/share/icons/hicolor/256x256/apps/shitty-iso-dl-gui.png 2>/dev/null || \
+          wget -q -O AppDir/usr/share/icons/hicolor/256x256/apps/shitty-iso-dl-gui.png \
             https://raw.githubusercontent.com/linuxdeploy/linuxdeploy/master/resources/linuxdeploy.png
 
       - name: Build AppImage
         env:
           ARCH: x86_64
-          OUTPUT: yourproject-gui.AppImage
+          OUTPUT: shitty-iso-dl-gui.AppImage
         run: |
           ./linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
@@ -138,13 +138,13 @@ jobs:
             --output appimage
 
           # Rename to predictable filename
-          mv *.AppImage yourproject-gui.AppImage
+          mv *.AppImage shitty-iso-dl-gui.AppImage
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-gui-appimage
-          path: yourproject-gui.AppImage
+          path: shitty-iso-dl-gui.AppImage
 
 
   # ─── Release: collect all artifacts and publish ───────────────────────────
