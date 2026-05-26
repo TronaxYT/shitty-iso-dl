@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 import json
 import re
+import socket
+import time
 import urllib.request
 import urllib.error
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+
+# Global socket timeout so a stalled mirror can't hang the worker forever.
+# Applies to connect and to per-read operations on the underlying socket.
+socket.setdefaulttimeout(60)
 
 DISTROS = {
     "Arch": {"type": "direct", "url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso"},
@@ -66,7 +72,7 @@ class ScraperEngine:
     def get_html(url, status_cb):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 return response.read().decode('utf-8')
         except Exception as e:
             status_cb(f"Error reading {url}: {e}")
@@ -107,7 +113,7 @@ class ScraperEngine:
         url = f"https://api.github.com/repos/{repo}/releases/latest"
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 for asset in data.get('assets', []):
                     if asset['name'].endswith('.iso'):
@@ -120,7 +126,8 @@ class ScraperEngine:
     def download_file(url, dest_folder, status_cb, progress_cb):
         file_name = url.split('/')[-1]
         dest_path = Path(dest_folder) / file_name
-        
+        tmp_path = dest_path.with_suffix(dest_path.suffix + '.part')
+
         if dest_path.exists():
             status_cb(f"{file_name} already exists. Skipping.")
             return True
@@ -128,27 +135,42 @@ class ScraperEngine:
         status_cb(f"Downloading {file_name}...")
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
+            # Download to .part first so an interrupted/aborted download is not
+            # mistaken for a finished one on the next run.
+            with urllib.request.urlopen(req, timeout=60) as response, open(tmp_path, 'wb') as out_file:
                 file_size = int(response.info().get('Content-Length', -1))
                 downloaded = 0
                 block_size = 1024 * 8
-                
+
                 while True:
                     buffer = response.read(block_size)
                     if not buffer:
                         break
                     downloaded += len(buffer)
                     out_file.write(buffer)
-                    
+
                     if file_size > 0:
                         percent = downloaded * 100 / file_size
                         mb_down = downloaded / (1024 * 1024)
                         mb_tot = file_size / (1024 * 1024)
                         progress_cb(percent, mb_down, mb_tot)
-                        
+
+            # Sanity check: if the server told us a size, make sure we got it.
+            if file_size > 0 and downloaded != file_size:
+                raise IOError(f"size mismatch: got {downloaded} bytes, expected {file_size}")
+
+            tmp_path.replace(dest_path)
             status_cb(f"Successfully downloaded {file_name}")
             return True
-        except Exception as e:
+        except BaseException as e:
+            # BaseException so we also clean up on Ctrl-C / SystemExit.
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            if isinstance(e, KeyboardInterrupt):
+                raise
             status_cb(f"Failed to download: {e}")
             return False
 
@@ -169,6 +191,9 @@ class DistrohopperApp(tk.Tk):
         self._build_ui()
         
         self.download_thread = None
+        # Throttle state for _update_progress: avoid flooding the Tk event
+        # queue with hundreds of thousands of after() calls per multi-GB ISO.
+        self._last_progress_emit = 0.0
 
     def _setup_styles(self):
         style = ttk.Style(self)
@@ -248,6 +273,13 @@ class DistrohopperApp(tk.Tk):
         self.after(0, lambda: self.status_var.set(message))
 
     def _update_progress(self, percent, mb_down, mb_total):
+        # Cap UI updates at ~10/s. Without this, a 4 GB ISO at 8 KB block size
+        # would queue ~500k after() calls and freeze the UI. Always let 100%
+        # through so the bar visibly fills at end-of-file.
+        now = time.monotonic()
+        if percent < 100 and (now - self._last_progress_emit) < 0.1:
+            return
+        self._last_progress_emit = now
         def ui_update():
             self.progress_var.set(percent)
             self.status_var.set(f"Downloading... {percent:.1f}% ({mb_down:.1f}/{mb_total:.1f} MB)")
@@ -279,9 +311,13 @@ class DistrohopperApp(tk.Tk):
         self.download_thread.start()
 
     def _download_worker(self, distros, dest_dir):
+        failures = []
         for distro in distros:
             self._update_status(f"Resolving URL for {distro}...")
             self.after(0, lambda: self.progress_var.set(0))
+            # Reset the throttle so the first progress tick of each download
+            # is emitted immediately rather than dropped.
+            self._last_progress_emit = 0.0
             
             config = DISTROS[distro]
             download_url = None
@@ -294,11 +330,20 @@ class DistrohopperApp(tk.Tk):
                 download_url = ScraperEngine.find_latest_via_regex(config, self._update_status)
 
             if download_url:
-                ScraperEngine.download_file(download_url, dest_dir, self._update_status, self._update_progress)
+                ok = ScraperEngine.download_file(download_url, dest_dir, self._update_status, self._update_progress)
+                if not ok:
+                    failures.append((distro, "download failed"))
             else:
                 self._update_status(f"Could not resolve download URL for {distro}")
+                failures.append((distro, "URL not resolved"))
             
-        self._update_status("All selected downloads finished.")
+        succeeded = len(distros) - len(failures)
+        if failures:
+            summary = f"Done. {succeeded}/{len(distros)} succeeded. Failed: " + \
+                      ", ".join(f"{name} ({reason})" for name, reason in failures)
+        else:
+            summary = f"All {succeeded} download(s) finished successfully."
+        self._update_status(summary)
         self.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
         self.after(0, lambda: self.listbox.config(state=tk.NORMAL))
 
