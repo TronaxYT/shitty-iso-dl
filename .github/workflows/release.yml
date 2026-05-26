@@ -136,8 +136,6 @@ jobs:
             --appdir AppDir \
             --output appimage
 
-          # Rename to predictable filename
-          mv *.AppImage shitty-iso-dl-gui.AppImage
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
