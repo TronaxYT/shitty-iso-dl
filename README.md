@@ -54,3 +54,12 @@ python src/shitty-iso-dl-gui.py
 **CLI** — prompts for a destination directory, then shows a numbered list of distros. Enter individual numbers separated by commas, or `A` for all.
 
 **GUI** — select a destination folder, pick one or more distros from the list, hit Download. Skips files that already exist.
+
+---
+
+## To-Do
+
+**Implement Checksum-check (idk how to call it)** - For obvious security reasons
+**Better GUI** - Tkinter is functional per-se, but I wanna make this pretty
+**Implement torrent** - Implement "Download with torrent" option, I know many users prefer this
+**Add distros** - This one is self-explanatory
