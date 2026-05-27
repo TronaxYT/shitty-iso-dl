@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 import os
+import socket
 import sys
 import json
 import re
 import urllib.request
 import urllib.error
+
+# Global socket timeout so a stalled mirror can't hang the bulk loop forever.
+# Applies to both connect and per-read operations on the underlying socket.
+socket.setdefaulttimeout(60)
 
 # ---------------------------------------------------------
 # set your download directory here, or leave blank 
@@ -316,7 +321,7 @@ DISTROS = {
 
 def get_html(url):
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    with urllib.request.urlopen(req) as response:
+    with urllib.request.urlopen(req, timeout=30) as response:
         return response.read().decode('utf-8')
 
 def find_latest_via_regex(config):
@@ -356,7 +361,7 @@ def find_latest_github(repo):
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode('utf-8'))
             for asset in data.get('assets', []):
                 if asset['name'].endswith('.iso'):
@@ -368,35 +373,55 @@ def find_latest_github(repo):
 def download_file(url, dest_folder):
     file_name = url.split('/')[-1]
     dest_path = os.path.join(dest_folder, file_name)
-    
+    tmp_path = dest_path + '.part'
+
     if os.path.exists(dest_path):
         print(f"  [*] {file_name} already exists. Skipping.")
-        return
+        return True
 
     print(f"  [*] Downloading {file_name}...")
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
+        # Download to .part first so an interrupted/aborted download is not
+        # mistaken for a finished one on the next run.
+        with urllib.request.urlopen(req, timeout=60) as response, open(tmp_path, 'wb') as out_file:
             file_size = int(response.info().get('Content-Length', -1))
             downloaded = 0
             block_size = 1024 * 8
-            
+
             while True:
                 buffer = response.read(block_size)
                 if not buffer:
                     break
                 downloaded += len(buffer)
                 out_file.write(buffer)
-                
+
                 if file_size > 0:
                     percent = downloaded * 100 / file_size
                     mb_downloaded = downloaded / (1024 * 1024)
                     mb_total = file_size / (1024 * 1024)
                     sys.stdout.write(f"\r      Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)")
                     sys.stdout.flush()
+
+        # Sanity check: if the server told us a size, make sure we got it.
+        if file_size > 0 and downloaded != file_size:
+            raise IOError(f"size mismatch: got {downloaded} bytes, expected {file_size}")
+
+        os.replace(tmp_path, dest_path)
         print("\n  [+] Download complete!")
-    except Exception as e:
+        return True
+    except BaseException as e:
+        # BaseException so we also clean up on Ctrl-C / SystemExit.
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        if isinstance(e, KeyboardInterrupt):
+            print("\n  [!] Interrupted by user.")
+            raise
         print(f"\n  [!] Failed to download: {e}")
+        return False
 
 def main():
     print("=== Linux ISO Auto-Puller ===")
@@ -435,6 +460,7 @@ def main():
             sys.exit(1)
 
     # Process Selections
+    failures = []
     for distro in selected_distros:
         print(f"\n>>> Processing {distro}...")
         config = DISTROS[distro]
@@ -449,9 +475,21 @@ def main():
 
         if download_url:
             print(f"  [*] Found latest: {download_url}")
-            download_file(download_url, dest_dir)
+            ok = download_file(download_url, dest_dir)
+            if not ok:
+                failures.append((distro, "download failed"))
         else:
             print("  [!] Could not resolve a download URL.")
+            failures.append((distro, "URL not resolved"))
+
+    # Final summary so per-distro failures don't get lost in a long bulk run.
+    print("\n=== Done ===")
+    succeeded = len(selected_distros) - len(failures)
+    print(f"  Succeeded: {succeeded}/{len(selected_distros)}")
+    if failures:
+        print("  Failed:")
+        for name, reason in failures:
+            print(f"    - {name}: {reason}")
 
 if __name__ == "__main__":
     main()
