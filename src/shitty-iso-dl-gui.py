@@ -68,6 +68,14 @@ DISTROS = {
 
 
 class ScraperEngine:
+    # Natural-key sort: splits a string into runs of digits and non-digits so
+    # that numeric runs compare as integers. Without this, plain sorted() picks
+    # '9' as "latest" over '10', breaking Mageia, Tails, Rocky, Devuan,
+    # CentOS-Stream, and any future distro that crosses a digit-count boundary.
+    @staticmethod
+    def _natural_key(s):
+        return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
+
     @staticmethod
     def get_html(url, status_cb):
         try:
@@ -90,7 +98,7 @@ class ScraperEngine:
             if not dirs: return None
             
             dirs = [d[0] if isinstance(d, tuple) else d for d in dirs]
-            latest_dir = sorted(dirs)[-1] 
+            latest_dir = sorted(dirs, key=cls._natural_key)[-1]
             target_url = f"{base_url}{latest_dir}/"
             
             if 'sub_path' in config:
@@ -105,7 +113,7 @@ class ScraperEngine:
         if not files: return None
         
         files = [f[0] if isinstance(f, tuple) else f for f in files]
-        latest_file = sorted(files)[-1]
+        latest_file = sorted(files, key=cls._natural_key)[-1]
         return target_url + latest_file
 
     @classmethod
