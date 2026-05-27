@@ -14,6 +14,34 @@ from pathlib import Path
 # Applies to connect and to per-read operations on the underlying socket.
 socket.setdefaulttimeout(60)
 
+# Filenames here come from either scraped HTML (regex-matched) or the GitHub
+# API (attacker-controllable). Even though current regexes are tight, we
+# defensively clamp filenames to a plausible-ISO-name shape and refuse anything
+# with path separators or query strings.
+_SAFE_FILENAME = re.compile(r'^[A-Za-z0-9._+-]+\.iso$')
+
+def safe_filename(url):
+    name = url.split('?', 1)[0].split('#', 1)[0].rsplit('/', 1)[-1]
+    if not _SAFE_FILENAME.match(name):
+        raise ValueError(f"refusing suspicious filename: {name!r}")
+    return name
+
+# A redirect handler that lets normal cross-host 3xx through (legitimate for
+# mirror systems and CDN handoffs) but refuses to downgrade HTTPS to HTTP.
+class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.full_url.startswith('https://') and newurl.startswith('http://'):
+            raise urllib.error.HTTPError(
+                req.full_url, code,
+                f"refusing HTTPS->HTTP downgrade to {newurl}",
+                headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+_opener = urllib.request.build_opener(_NoDowngradeRedirectHandler())
+_opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+urllib.request.install_opener(_opener)
+
 DISTROS = {
     "Arch": {"type": "direct", "url": "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso"},
     "Manjaro-KDE": {"type": "regex", "base_url": "https://mirror.easyname.at/manjaro/kde/", "dir_regex": r'href="([0-9\.]+)/"', "file_regex": r'href="(manjaro-kde-[0-9\.]+-linux[0-9]+\.iso)"'},
@@ -56,7 +84,7 @@ DISTROS = {
     "Deepin": {"type": "regex", "base_url": "https://cdimage.deepin.com/releases/", "dir_regex": r'href="([0-9\.]+)/"', "file_regex": r'href="(deepin-desktop-community-[0-9\.]+-amd64\.iso)"'},
     "ClearLinux": {"type": "regex", "base_url": "https://cdn.download.clearlinux.org/current/", "file_regex": r'href="(clear-[0-9]+-live-desktop\.iso)"'},
     "Puppy-Linux": {"type": "regex", "base_url": "https://distro.ibiblio.org/puppylinux/puppy-fossa/", "file_regex": r'href="(fossapup64-[0-9\.]+\.iso)"'},
-    "TinyCore": {"type": "regex", "base_url": "http://tinycorelinux.net/14.x/x86_64/release/", "file_regex": r'href="(CorePure64-[0-9\.]+\.iso)"'},
+    "TinyCore": {"type": "regex", "base_url": "https://tinycorelinux.net/14.x/x86_64/release/", "file_regex": r'href="(CorePure64-[0-9\.]+\.iso)"'},
     "GoboLinux": {"type": "github", "repo": "gobolinux/LiveCD"},
     "KaOS": {"type": "regex", "base_url": "https://mirrors.kernel.org/kaos/iso/", "dir_regex": r'href="([0-9\.]+)/"', "file_regex": r'href="(KaOS-[0-9\.]+-x86_64\.iso)"'},
     "Calculate-Linux": {"type": "regex", "base_url": "https://mirror.yandex.ru/calculate/release/", "dir_regex": r'href="([0-9\.]+)/"', "file_regex": r'href="(cld-[0-9\.]+-x86_64\.iso)"'},
@@ -75,6 +103,58 @@ class ScraperEngine:
     @staticmethod
     def _natural_key(s):
         return [int(p) if p.isdigit() else p.lower() for p in re.split(r'(\d+)', s)]
+
+    # ---- SHA256 verification (optional) ------------------------------------
+    # Caveat: the SHA file is usually hosted next to the ISO on the same mirror,
+    # so this catches transport corruption but not a compromised mirror. Real
+    # protection needs GPG-signed checksum files (per-distro work, not yet done).
+    _SHA_CANDIDATES = ("SHA256SUMS", "sha256sums.txt", "sha256sum.txt", "SHA256")
+
+    @staticmethod
+    def _parse_sha256_for(text, iso_filename):
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            # BSD style: "SHA256 (file) = hash"
+            if line.startswith('SHA256') and '=' in line and iso_filename in line:
+                hexpart = line.split('=', 1)[1].strip().split()[0]
+                if re.fullmatch(r'[0-9a-fA-F]{64}', hexpart):
+                    return hexpart.lower()
+            # coreutils style: "hash  file" (with optional '*' or './' prefix on the name)
+            parts = line.split()
+            if len(parts) >= 2 and re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]):
+                tail = parts[-1].lstrip('*').lstrip('./')
+                if tail == iso_filename:
+                    return parts[0].lower()
+        return None
+
+    @classmethod
+    def fetch_expected_sha256(cls, iso_url, iso_filename, status_cb):
+        base = iso_url.rsplit('/', 1)[0] + '/'
+        sidecars = (f"{iso_filename}.sha256", f"{iso_filename}.sha256sum")
+        for candidate in sidecars + cls._SHA_CANDIDATES:
+            text = cls.get_html(base + candidate, lambda _msg: None)
+            if not text:
+                continue
+            if candidate in sidecars:
+                first = text.strip().split()
+                if first and re.fullmatch(r'[0-9a-fA-F]{64}', first[0]):
+                    return first[0].lower()
+            got = cls._parse_sha256_for(text, iso_filename)
+            if got:
+                return got
+        return None
+
+    @staticmethod
+    def _sha256_file(path):
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    # ------------------------------------------------------------------------
 
     @staticmethod
     def get_html(url, status_cb):
@@ -131,14 +211,29 @@ class ScraperEngine:
         return None
 
     @staticmethod
-    def download_file(url, dest_folder, status_cb, progress_cb):
-        file_name = url.split('/')[-1]
+    def download_file(url, dest_folder, status_cb, progress_cb, verify_sha256=False):
+        try:
+            file_name = safe_filename(url)
+        except ValueError as e:
+            status_cb(str(e))
+            return False
         dest_path = Path(dest_folder) / file_name
         tmp_path = dest_path.with_suffix(dest_path.suffix + '.part')
 
         if dest_path.exists():
             status_cb(f"{file_name} already exists. Skipping.")
             return True
+
+        expected_sha = None
+        if verify_sha256:
+            status_cb(f"Looking up SHA256 for {file_name}...")
+            try:
+                expected_sha = ScraperEngine.fetch_expected_sha256(url, file_name, status_cb)
+            except Exception as e:
+                status_cb(f"Could not fetch SHA256 file: {e}")
+            if expected_sha is None:
+                status_cb(f"No SHA256 found for {file_name}; refusing (uncheck Verify to skip).")
+                return False
 
         status_cb(f"Downloading {file_name}...")
         try:
@@ -166,6 +261,14 @@ class ScraperEngine:
             # Sanity check: if the server told us a size, make sure we got it.
             if file_size > 0 and downloaded != file_size:
                 raise IOError(f"size mismatch: got {downloaded} bytes, expected {file_size}")
+
+            # Verify checksum BEFORE the rename, so a mismatched file never lands
+            # under its final name where the next run would treat it as complete.
+            if expected_sha is not None:
+                status_cb(f"Verifying SHA256 for {file_name}...")
+                actual = ScraperEngine._sha256_file(tmp_path)
+                if actual.lower() != expected_sha.lower():
+                    raise IOError(f"SHA256 mismatch: got {actual}, expected {expected_sha}")
 
             tmp_path.replace(dest_path)
             status_cb(f"Successfully downloaded {file_name}")
@@ -268,7 +371,11 @@ class DistrohopperApp(tk.Tk):
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X)
-        
+
+        self.verify_var = tk.BooleanVar(value=False)
+        verify_chk = ttk.Checkbutton(btn_frame, text="Verify SHA256", variable=self.verify_var)
+        verify_chk.pack(side=tk.LEFT, padx=(0, 10))
+
         self.download_btn = ttk.Button(btn_frame, text="Download Selected", command=self._start_download)
         self.download_btn.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
@@ -307,18 +414,19 @@ class DistrohopperApp(tk.Tk):
             return
 
         selected_distros = [self.listbox.get(i) for i in selected_indices]
-        
+        verify_sha256 = bool(self.verify_var.get())
+
         self.download_btn.config(state=tk.DISABLED)
         self.listbox.config(state=tk.DISABLED)
         
         self.download_thread = threading.Thread(
             target=self._download_worker, 
-            args=(selected_distros, dest_dir), 
+            args=(selected_distros, dest_dir, verify_sha256),
             daemon=True
         )
         self.download_thread.start()
 
-    def _download_worker(self, distros, dest_dir):
+    def _download_worker(self, distros, dest_dir, verify_sha256=False):
         failures = []
         for distro in distros:
             self._update_status(f"Resolving URL for {distro}...")
@@ -338,7 +446,7 @@ class DistrohopperApp(tk.Tk):
                 download_url = ScraperEngine.find_latest_via_regex(config, self._update_status)
 
             if download_url:
-                ok = ScraperEngine.download_file(download_url, dest_dir, self._update_status, self._update_progress)
+                ok = ScraperEngine.download_file(download_url, dest_dir, self._update_status, self._update_progress, verify_sha256=verify_sha256)
                 if not ok:
                     failures.append((distro, "download failed"))
             else:
